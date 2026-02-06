@@ -4,11 +4,24 @@ import pandas as pd
 import json
 import os
 import requests
+from datetime import datetime
 from dotenv import load_dotenv
 from boto3.dynamodb.conditions import Key, Attr
 
 # Load environment variables
 load_dotenv()
+
+
+def format_date(iso_date_str):
+    """Format ISO date string to a more readable format"""
+    if not iso_date_str or iso_date_str == 'N/A':
+        return 'N/A'
+    try:
+        # Parse ISO format like "2026-02-04T22:18:11.905013"
+        dt = datetime.fromisoformat(iso_date_str.replace('Z', '+00:00'))
+        return dt.strftime('%b %d, %Y %I:%M %p')  # e.g., "Feb 04, 2026 10:18 PM"
+    except (ValueError, AttributeError):
+        return iso_date_str  # Return original if parsing fails
 
 CLERK_SECRET_KEY = os.getenv("CLERK_SECRET_KEY")
 
@@ -218,7 +231,7 @@ else:
                     admin_email = admin_email_cache.get(org_id, 'N/A')
                     
                     # Date deployed
-                    date_deployed = item.get('created_at', 'N/A')
+                    date_deployed = format_date(item.get('created_at', 'N/A'))
                     
                     # Project name
                     project_name = item.get('name', 'N/A')
