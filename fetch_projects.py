@@ -1,5 +1,6 @@
+import streamlit as st
 import boto3
-import csv
+import pandas as pd
 import json
 import os
 import requests
@@ -11,11 +12,16 @@ load_dotenv()
 
 CLERK_SECRET_KEY = os.getenv("CLERK_SECRET_KEY")
 
+st.set_page_config(page_title="Projects Dashboard", layout="wide")
 
+st.title("Projects Dashboard")
+
+
+@st.cache_data(ttl=300)  # Cache for 5 minutes
 def fetch_clerk_organizations():
     """Fetch all organizations from Clerk and return a dict mapping org_id -> org_info"""
     if not CLERK_SECRET_KEY:
-        print("Warning: CLERK_SECRET_KEY not found. Organization names will not be available.")
+        st.warning("CLERK_SECRET_KEY not found. Organization names will not be available.")
         return {}
     
     orgs_map = {}
@@ -45,10 +51,8 @@ def fetch_clerk_organizations():
                     'name': org.get('name', 'N/A'),
                     'created_by': org.get('created_by'),
                 }
-        
-        print(f"Fetched {len(orgs_map)} organizations from Clerk.")
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching organizations from Clerk: {e}")
+        st.error(f"Error fetching organizations from Clerk: {e}")
     
     return orgs_map
 
@@ -99,7 +103,7 @@ def fetch_org_admin_email(org_id):
             return email if email else "N/A"
             
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching org memberships for {org_id}: {e}")
+        st.error(f"Error fetching org memberships for {org_id}: {e}")
     
     return "N/A"
 
@@ -130,13 +134,14 @@ def fetch_user_email(user_id):
                         return email_obj.get('email_address')
             return email_addresses[0].get('email_address')
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching user {user_id}: {e}")
+        pass  # Silently fail for individual user fetches
     
     return None
 
 
-def fetch_projects():
-    # Initialize DynamoDB client
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def fetch_projects_from_dynamodb():
+    """Fetch projects from DynamoDB"""
     dynamodb = boto3.resource(
         'dynamodb',
         region_name=os.getenv('AWS_REGION', 'us-east-1'),
@@ -146,12 +151,6 @@ def fetch_projects():
 
     table_name = 'shorlabs-projects'
     table = dynamodb.Table(table_name)
-    
-    print(f"Scanning table {table_name}...")
-
-    # Fetch Clerk organizations first
-    print("Fetching organizations from Clerk...")
-    orgs_map = fetch_clerk_organizations()
 
     # Scan the table for projects
     # Projects now have PK starting with "ORG#" and SK starting with "PROJECT#"
@@ -169,102 +168,109 @@ def fetch_projects():
         )
         items.extend(response.get('Items', []))
 
-    print(f"Found {len(items)} projects.")
+    return items
 
-    if not items:
-        print("No projects found.")
-        return
 
-    # Define CSV headers - updated for organization-based model
-    fieldnames = [
-        "PK", "SK", "organization_id", "created_at", "created_by", "custom_url",
-        "env_vars", "ephemeral_storage", "function_name", "function_url", 
-        "github_repo", "github_url", "memory", "migrated_at", "name", 
-        "project_id", "root_directory", "start_command", "status", 
-        "subdomain", "timeout", "updated_at"
-    ]
+# Check for required environment variables
+missing_vars = []
+if not os.getenv('AWS_ACCESS_KEY_ID'):
+    missing_vars.append('AWS_ACCESS_KEY_ID')
+if not os.getenv('AWS_SECRET_ACCESS_KEY'):
+    missing_vars.append('AWS_SECRET_ACCESS_KEY')
+if not CLERK_SECRET_KEY:
+    missing_vars.append('CLERK_SECRET_KEY')
 
-    output_file = 'projects.csv'
-    
-    with open(output_file, 'w', newline='') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        
-        writer.writeheader()
-        
-        for item in items:
-            row = {}
-            for field in fieldnames:
-                if field in item:
-                    val = item[field]
-                    if field == 'env_vars' and isinstance(val, dict):
-                        row[field] = json.dumps(val)
-                    else:
-                        row[field] = val
-                else:
-                    row[field] = ""
+if missing_vars:
+    st.error(f"Missing environment variables: {', '.join(missing_vars)}")
+else:
+    with st.spinner("Fetching data..."):
+        try:
+            # Fetch organizations from Clerk
+            orgs_map = fetch_clerk_organizations()
             
-            writer.writerow(row)
-
-    print(f"Successfully wrote data to {output_file}\n")
-
-    # Defined headers and column widths for the terminal output
-    # Updated: Org ID, Organization Name, Admin Email, Date Deployed, Project URL
-    headers = ["Org ID", "Organization Name", "Admin Email", "Date Deployed", "Project URL"]
-    # min widths
-    widths = [35, 25, 30, 25, 45]
-
-    # Cache for admin emails to avoid repeated API calls
-    admin_email_cache = {}
-
-    # detailed_projects list for display
-    display_rows = []
-    for item in items:
-        # Extract org_id from organization_id field or from PK
-        org_id = item.get('organization_id', '')
-        if not org_id:
-            # Try extracting from PK (format: ORG#org_xxx)
-            pk = item.get('PK', '')
-            if pk.startswith('ORG#'):
-                org_id = pk[4:]  # Remove 'ORG#' prefix
-        
-        # Get organization name from Clerk data
-        org_info = orgs_map.get(org_id, {})
-        org_name = org_info.get('name', 'N/A')
-        
-        # Get admin email (with caching)
-        if org_id not in admin_email_cache:
-            admin_email_cache[org_id] = fetch_org_admin_email(org_id)
-        admin_email = admin_email_cache.get(org_id, 'N/A')
-        
-        # Date deployed
-        date_deployed = item.get('created_at', 'N/A')
-        
-        # Use custom_url if it exists, otherwise function_url
-        url = item.get('custom_url')
-        if not url:
-            url = item.get('function_url', 'N/A')
-        
-        display_rows.append([org_id, org_name, admin_email, date_deployed, url])
-        
-        # dynamic width adjustment
-        widths[0] = max(widths[0], len(str(org_id)))
-        widths[1] = max(widths[1], len(str(org_name)))
-        widths[2] = max(widths[2], len(str(admin_email)))
-        widths[3] = max(widths[3], len(str(date_deployed)))
-        widths[4] = max(widths[4], len(str(url)))
-
-    # Create format string
-    fmt = "  ".join([f"{{:<{w}}}" for w in widths])
-
-    # Print Table
-    print("-" * (sum(widths) + 8))
-    print(fmt.format(*headers))
-    print("-" * (sum(widths) + 8))
-    
-    for row in display_rows:
-        print(fmt.format(*row))
-    print("-" * (sum(widths) + 8))
-
-
-if __name__ == "__main__":
-    fetch_projects()
+            # Fetch projects from DynamoDB
+            items = fetch_projects_from_dynamodb()
+            
+            if not items:
+                st.info("No projects found.")
+            else:
+                # Cache for admin emails
+                admin_email_cache = {}
+                
+                # Build display data
+                parsed_projects = []
+                for item in items:
+                    # Extract org_id from organization_id field or from PK
+                    org_id = item.get('organization_id', '')
+                    if not org_id:
+                        # Try extracting from PK (format: ORG#org_xxx)
+                        pk = item.get('PK', '')
+                        if pk.startswith('ORG#'):
+                            org_id = pk[4:]  # Remove 'ORG#' prefix
+                    
+                    # Get organization name from Clerk data
+                    org_info = orgs_map.get(org_id, {})
+                    org_name = org_info.get('name', 'N/A')
+                    
+                    # Get admin email (with caching)
+                    if org_id not in admin_email_cache:
+                        admin_email_cache[org_id] = fetch_org_admin_email(org_id)
+                    admin_email = admin_email_cache.get(org_id, 'N/A')
+                    
+                    # Date deployed
+                    date_deployed = item.get('created_at', 'N/A')
+                    
+                    # Project name
+                    project_name = item.get('name', 'N/A')
+                    
+                    # Use custom_url if it exists, otherwise function_url
+                    url = item.get('custom_url')
+                    if not url:
+                        url = item.get('function_url', 'N/A')
+                    
+                    # Status
+                    status = item.get('status', 'N/A')
+                    
+                    parsed_projects.append({
+                        "Org ID": org_id,
+                        "Organization Name": org_name,
+                        "Admin Email": admin_email,
+                        "Project Name": project_name,
+                        "Status": status,
+                        "Date Deployed": date_deployed,
+                        "Project URL": url
+                    })
+                
+                if parsed_projects:
+                    df = pd.DataFrame(parsed_projects)
+                    
+                    # Top Level Metrics
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric(label="Total Projects", value=len(df))
+                    with col2:
+                        st.metric(label="Unique Organizations", value=df['Org ID'].nunique())
+                    with col3:
+                        live_count = len(df[df['Status'] == 'LIVE'])
+                        st.metric(label="Live Projects", value=live_count)
+                    
+                    st.divider()
+                    
+                    # Display the dataframe
+                    st.dataframe(df, use_container_width=True)
+                    
+                    # CSV Export
+                    csv = df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="Download data as CSV",
+                        data=csv,
+                        file_name='projects_export.csv',
+                        mime='text/csv',
+                    )
+                    
+                    st.success(f"Successfully loaded {len(df)} projects from {df['Org ID'].nunique()} organizations.")
+                else:
+                    st.info("No projects found.")
+                    
+        except Exception as e:
+            st.error(f"Error: {e}")
