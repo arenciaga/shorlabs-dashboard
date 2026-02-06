@@ -1,11 +1,139 @@
 import boto3
 import csv
+import json
 import os
+import requests
 from dotenv import load_dotenv
 from boto3.dynamodb.conditions import Key, Attr
 
 # Load environment variables
 load_dotenv()
+
+CLERK_SECRET_KEY = os.getenv("CLERK_SECRET_KEY")
+
+
+def fetch_clerk_organizations():
+    """Fetch all organizations from Clerk and return a dict mapping org_id -> org_info"""
+    if not CLERK_SECRET_KEY:
+        print("Warning: CLERK_SECRET_KEY not found. Organization names will not be available.")
+        return {}
+    
+    orgs_map = {}
+    url = "https://api.clerk.com/v1/organizations?limit=500"
+    headers = {
+        "Authorization": f"Bearer {CLERK_SECRET_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        orgs_data = response.json()
+        
+        # Handle different response formats
+        if isinstance(orgs_data, list):
+            orgs_list = orgs_data
+        elif isinstance(orgs_data, dict) and 'data' in orgs_data:
+            orgs_list = orgs_data.get('data', [])
+        else:
+            orgs_list = []
+        
+        for org in orgs_list:
+            org_id = org.get('id')
+            if org_id:
+                orgs_map[org_id] = {
+                    'name': org.get('name', 'N/A'),
+                    'created_by': org.get('created_by'),
+                }
+        
+        print(f"Fetched {len(orgs_map)} organizations from Clerk.")
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching organizations from Clerk: {e}")
+    
+    return orgs_map
+
+
+def fetch_org_admin_email(org_id):
+    """Fetch the admin member of an organization and return their email"""
+    if not CLERK_SECRET_KEY:
+        return "N/A"
+    
+    url = f"https://api.clerk.com/v1/organizations/{org_id}/memberships?limit=100"
+    headers = {
+        "Authorization": f"Bearer {CLERK_SECRET_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        memberships_data = response.json()
+        
+        # Handle different response formats
+        if isinstance(memberships_data, list):
+            memberships = memberships_data
+        elif isinstance(memberships_data, dict) and 'data' in memberships_data:
+            memberships = memberships_data.get('data', [])
+        else:
+            memberships = []
+        
+        # Find admin member
+        for membership in memberships:
+            role = membership.get('role', '')
+            if role == 'org:admin' or role == 'admin':
+                # Get user info from public_user_data
+                public_user_data = membership.get('public_user_data', {})
+                # Try identifier first (usually email), then other fields
+                email = public_user_data.get('identifier')
+                if not email:
+                    # Fallback: fetch user details
+                    user_id = public_user_data.get('user_id')
+                    if user_id:
+                        email = fetch_user_email(user_id)
+                return email if email else "N/A"
+        
+        # If no admin found, return first member's email
+        if memberships:
+            public_user_data = memberships[0].get('public_user_data', {})
+            email = public_user_data.get('identifier')
+            return email if email else "N/A"
+            
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching org memberships for {org_id}: {e}")
+    
+    return "N/A"
+
+
+def fetch_user_email(user_id):
+    """Fetch a user's email by their ID"""
+    if not CLERK_SECRET_KEY:
+        return None
+    
+    url = f"https://api.clerk.com/v1/users/{user_id}"
+    headers = {
+        "Authorization": f"Bearer {CLERK_SECRET_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        user = response.json()
+        
+        email_addresses = user.get('email_addresses', [])
+        primary_id = user.get('primary_email_address_id')
+        
+        if email_addresses:
+            if primary_id:
+                for email_obj in email_addresses:
+                    if email_obj.get('id') == primary_id:
+                        return email_obj.get('email_address')
+            return email_addresses[0].get('email_address')
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching user {user_id}: {e}")
+    
+    return None
+
 
 def fetch_projects():
     # Initialize DynamoDB client
@@ -21,25 +149,22 @@ def fetch_projects():
     
     print(f"Scanning table {table_name}...")
 
-    # Scan the table
-    # We filter specifically for projects. 
-    # Based on the provided data struct:
-    # Projects have SK starting with "PROJECT#" and PK starting with "USER#"
-    # Deployments have PK starting with "PROJECT#"
-    
-    # Using a FilterExpression to only get projects
-    # We check if SK begins with 'PROJECT#'
-    # Note: Scanning is expensive on large tables, but for a script like this it's usually what is intended unless we know specific User IDs.
+    # Fetch Clerk organizations first
+    print("Fetching organizations from Clerk...")
+    orgs_map = fetch_clerk_organizations()
+
+    # Scan the table for projects
+    # Projects now have PK starting with "ORG#" and SK starting with "PROJECT#"
     response = table.scan(
-        FilterExpression=Attr('SK').begins_with('PROJECT#')
+        FilterExpression=Attr('SK').begins_with('PROJECT#') & Attr('PK').begins_with('ORG#')
     )
     
     items = response.get('Items', [])
     
-    # Handle pagination if permitted/needed (Loop until LastEvaluatedKey is empty)
+    # Handle pagination
     while 'LastEvaluatedKey' in response:
         response = table.scan(
-            FilterExpression=Attr('SK').begins_with('PROJECT#'),
+            FilterExpression=Attr('SK').begins_with('PROJECT#') & Attr('PK').begins_with('ORG#'),
             ExclusiveStartKey=response['LastEvaluatedKey']
         )
         items.extend(response.get('Items', []))
@@ -50,14 +175,13 @@ def fetch_projects():
         print("No projects found.")
         return
 
-    # Define CSV headers based on the prompt's example
+    # Define CSV headers - updated for organization-based model
     fieldnames = [
-        "PK", "SK", "build_id", "created_at", "custom_url", "deploy_id", 
-        "ecr_repo", "env_vars", "ephemeral_storage", "finished_at", 
-        "function_name", "function_url", "github_repo", "github_url", 
-        "logs_url", "memory", "name", "project_id", "root_directory", 
-        "start_command", "started_at", "status", "subdomain", "timeout", 
-        "updated_at", "user_id"
+        "PK", "SK", "organization_id", "created_at", "created_by", "custom_url",
+        "env_vars", "ephemeral_storage", "function_name", "function_url", 
+        "github_repo", "github_url", "memory", "migrated_at", "name", 
+        "project_id", "root_directory", "start_command", "status", 
+        "subdomain", "timeout", "updated_at"
     ]
 
     output_file = 'projects.csv'
@@ -68,20 +192,12 @@ def fetch_projects():
         writer.writeheader()
         
         for item in items:
-            # Create a row dictionary, handling missing keys
             row = {}
             for field in fieldnames:
-                # DynamoDB might return Decimal types or others, standardizing to string might be safer for CSV
-                # But DictWriter handles basic types well.
-                # However, nested objects like 'env_vars' might come out as dictionaries.
-                # In the prompt, env_vars looks like a JSON string or string representation of a dict.
-                # If it's a Map in DynamoDB, boto3 deserializes it to a dict.
                 if field in item:
                     val = item[field]
                     if field == 'env_vars' and isinstance(val, dict):
-                         # If it's a dictionary, maybe stringify it to match the CSV format implied
-                         import json
-                         row[field] = json.dumps(val)
+                        row[field] = json.dumps(val)
                     else:
                         row[field] = val
                 else:
@@ -92,40 +208,63 @@ def fetch_projects():
     print(f"Successfully wrote data to {output_file}\n")
 
     # Defined headers and column widths for the terminal output
-    headers = ["User ID", "Project ID", "Date Deployed", "Project URL"]
+    # Updated: Org ID, Organization Name, Admin Email, Date Deployed, Project URL
+    headers = ["Org ID", "Organization Name", "Admin Email", "Date Deployed", "Project URL"]
     # min widths
-    widths = [20, 15, 25, 40] 
+    widths = [35, 25, 30, 25, 45]
+
+    # Cache for admin emails to avoid repeated API calls
+    admin_email_cache = {}
 
     # detailed_projects list for display
     display_rows = []
     for item in items:
-        u_id = item.get('user_id', 'N/A')
-        p_id = item.get('project_id', 'N/A')
-        c_at = item.get('created_at', 'N/A')
-        # Use custom_url if it exists, otherwise function_url, otherwise N/A
+        # Extract org_id from organization_id field or from PK
+        org_id = item.get('organization_id', '')
+        if not org_id:
+            # Try extracting from PK (format: ORG#org_xxx)
+            pk = item.get('PK', '')
+            if pk.startswith('ORG#'):
+                org_id = pk[4:]  # Remove 'ORG#' prefix
+        
+        # Get organization name from Clerk data
+        org_info = orgs_map.get(org_id, {})
+        org_name = org_info.get('name', 'N/A')
+        
+        # Get admin email (with caching)
+        if org_id not in admin_email_cache:
+            admin_email_cache[org_id] = fetch_org_admin_email(org_id)
+        admin_email = admin_email_cache.get(org_id, 'N/A')
+        
+        # Date deployed
+        date_deployed = item.get('created_at', 'N/A')
+        
+        # Use custom_url if it exists, otherwise function_url
         url = item.get('custom_url')
         if not url:
             url = item.get('function_url', 'N/A')
         
-        display_rows.append([u_id, p_id, c_at, url])
+        display_rows.append([org_id, org_name, admin_email, date_deployed, url])
         
         # dynamic width adjustment
-        widths[0] = max(widths[0], len(u_id))
-        widths[1] = max(widths[1], len(p_id))
-        widths[2] = max(widths[2], len(c_at))
-        widths[3] = max(widths[3], len(url))
+        widths[0] = max(widths[0], len(str(org_id)))
+        widths[1] = max(widths[1], len(str(org_name)))
+        widths[2] = max(widths[2], len(str(admin_email)))
+        widths[3] = max(widths[3], len(str(date_deployed)))
+        widths[4] = max(widths[4], len(str(url)))
 
     # Create format string
-    fmt = f"{{:<{widths[0]}}}  {{:<{widths[1]}}}  {{:<{widths[2]}}}  {{:<{widths[3]}}}"
+    fmt = "  ".join([f"{{:<{w}}}" for w in widths])
 
     # Print Table
-    print("-" * (sum(widths) + 6))
+    print("-" * (sum(widths) + 8))
     print(fmt.format(*headers))
-    print("-" * (sum(widths) + 6))
+    print("-" * (sum(widths) + 8))
     
     for row in display_rows:
         print(fmt.format(*row))
-    print("-" * (sum(widths) + 6))
+    print("-" * (sum(widths) + 8))
+
 
 if __name__ == "__main__":
     fetch_projects()
