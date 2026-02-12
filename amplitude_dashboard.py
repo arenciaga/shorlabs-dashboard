@@ -16,6 +16,20 @@ except:
 
 st.title("📊 Website Traffic Dashboard")
 
+# Event name input
+st.sidebar.header("⚙️ Settings")
+event_name = st.sidebar.text_input(
+    "Amplitude Event Name", 
+    value="Page Viewed",
+    help="Enter the exact event name from your Amplitude setup"
+)
+
+st.sidebar.caption("Common event names:")
+st.sidebar.caption("• Page Viewed")
+st.sidebar.caption("• Page View")
+st.sidebar.caption("• pageview")
+st.sidebar.caption("• Viewed Page")
+
 # Time period selector
 period = st.selectbox("Time Period", ["Last 24 Hours", "Last 7 Days", "Last 30 Days"])
 
@@ -32,11 +46,11 @@ start_str = start_date.strftime("%Y%m%d")
 end_str = end_date.strftime("%Y%m%d")
 
 
-def get_traffic(api_key, secret_key, start, end):
+def get_traffic(api_key, secret_key, start, end, event_name):
     """Get traffic data from Amplitude"""
     url = "https://amplitude.com/api/2/events/segmentation"
     params = {
-        "e": {"event_type": "Page Viewed"},
+        "e": {"event_type": event_name},
         "start": start,
         "end": end
     }
@@ -50,7 +64,7 @@ def get_traffic(api_key, secret_key, start, end):
 
 # Fetch data
 with st.spinner("Loading traffic data..."):
-    data = get_traffic(api_key, secret_key, start_str, end_str)
+    data = get_traffic(api_key, secret_key, start_str, end_str, event_name)
 
 if data and 'data' in data:
     # Get the traffic numbers
@@ -102,7 +116,8 @@ if data and 'data' in data:
     else:
         st.warning("No traffic data found. Check your Amplitude event name.")
 else:
-    st.error("Couldn't fetch data. Check your Amplitude setup and make sure you're tracking 'Page Viewed' events.")
+    st.error(f"Couldn't fetch data. Make sure '{event_name}' is the correct event name in your Amplitude setup.")
+    st.info("👉 Check your Amplitude project to see what events you're actually tracking, then update the event name in the sidebar.")
 
 st.markdown("---")
 st.caption("💡 Post your promotion and refresh to see if traffic spikes")
