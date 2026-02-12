@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
+import os
 
 # Page configuration
 st.set_page_config(
@@ -17,8 +18,21 @@ st.title("📊 Amplitude Analytics Dashboard")
 
 # Sidebar for API credentials
 st.sidebar.header("🔑 Amplitude Configuration")
-api_key = st.sidebar.text_input("API Key", type="password", help="Enter your Amplitude API Key")
-secret_key = st.sidebar.text_input("Secret Key", type="password", help="Enter your Amplitude Secret Key")
+
+# Try to get credentials from environment variables first
+api_key = os.environ.get("AMPLITUDE_API_KEY", "")
+secret_key = os.environ.get("AMPLITUDE_SECRET_KEY", "")
+
+# If not found in environment variables, allow manual input
+if not api_key:
+    api_key = st.sidebar.text_input("API Key", type="password", help="Enter your Amplitude API Key or set AMPLITUDE_API_KEY environment variable")
+else:
+    st.sidebar.success("✅ API Key loaded from environment variable")
+    
+if not secret_key:
+    secret_key = st.sidebar.text_input("Secret Key", type="password", help="Enter your Amplitude Secret Key or set AMPLITUDE_SECRET_KEY environment variable")
+else:
+    st.sidebar.success("✅ Secret Key loaded from environment variable")
 
 # Time period selection
 st.sidebar.header("📅 Time Period")
