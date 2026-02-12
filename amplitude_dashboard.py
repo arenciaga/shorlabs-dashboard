@@ -33,17 +33,27 @@ def get_all_events(api_key, secret_key):
             events = []
             for event in events_data:
                 if isinstance(event, dict):
+                    # Skip hidden and deleted events
+                    if event.get('hidden', False) or event.get('deleted', False):
+                        continue
+                    
                     display_name = event.get('display', event.get('value', ''))
                     value_name = event.get('value', display_name)
+                    
                     events.append({
                         'display': display_name,
-                        'value': value_name
+                        'value': value_name,
+                        'totals': event.get('totals', 0)
                     })
                 else:
                     events.append({
                         'display': str(event),
-                        'value': str(event)
+                        'value': str(event),
+                        'totals': 0
                     })
+            
+            # Sort by totals (most active events first)
+            events.sort(key=lambda x: x.get('totals', 0), reverse=True)
             
             return events
         else:
@@ -55,38 +65,60 @@ def get_all_events(api_key, secret_key):
 
 
 def get_traffic(api_key, secret_key, start, end, event_value):
-    """Get traffic data for specific event"""
+    """Get traffic data for specific event - tries multiple formats"""
     url = "https://amplitude.com/api/2/events/segmentation"
     
-    # Handle special Amplitude events
-    if event_value.startswith('[Amplitude]'):
-        # Map special events to their API values
+    # Try different event name formats
+    event_attempts = []
+    
+    # Handle special Amplitude events first
+    if '[Amplitude]' in event_value:
         if 'Any Active Event' in event_value:
-            event_value = '_active'
+            event_attempts.append('_active')
         elif 'Any Event' in event_value:
-            event_value = '_all'
-        elif 'Page Viewed' in event_value:
-            # Try the actual event name without prefix
-            event_value = 'Page Viewed'
+            event_attempts.append('_all')
+        elif 'Page Viewed' in event_value or 'Page View' in event_value:
+            # Try both with and without the [Amplitude] prefix
+            event_attempts.append('Page Viewed')
+            event_attempts.append('Page View')
+    else:
+        # For non-Amplitude events, try as-is first, then with ce: prefix
+        event_attempts.append(event_value)
+        event_attempts.append(f'ce:{event_value}')
     
-    params = {
-        "e": json.dumps({"event_type": event_value}),
-        "start": start,
-        "end": end,
-        "m": "uniques"  # Get unique users
-    }
+    last_error = None
     
-    try:
-        response = requests.get(url, auth=(api_key, secret_key), params=params)
+    # Try each format until one works
+    for attempt in event_attempts:
+        params = {
+            "e": json.dumps({"event_type": attempt}),
+            "start": start,
+            "end": end,
+            "m": "uniques"
+        }
         
-        if response.status_code == 200:
-            return response.json()
-        else:
-            st.error(f"API Error {response.status_code}: {response.text}")
-            return None
-    except Exception as e:
-        st.error(f"Request Error: {str(e)}")
-        return None
+        try:
+            response = requests.get(url, auth=(api_key, secret_key), params=params)
+            
+            if response.status_code == 200:
+                data = response.json()
+                # Check if we actually got data
+                if data and 'data' in data and data['data'].get('series'):
+                    st.success(f"✅ Found data using event name: `{attempt}`")
+                    return data
+            else:
+                last_error = f"{response.status_code}: {response.text}"
+        except Exception as e:
+            last_error = str(e)
+    
+    # If all attempts failed, show what we tried
+    st.error(f"Couldn't load data. Tried these event names:")
+    for attempt in event_attempts:
+        st.error(f"  • `{attempt}`")
+    if last_error:
+        st.error(f"Last error: {last_error}")
+    
+    return None
 
 
 # Fetch all available events
@@ -97,16 +129,27 @@ if not events:
     st.error("Couldn't fetch events. Check your API credentials.")
     st.stop()
 
-# Create dropdown options
-event_options = {f"{e['display']}": e['value'] for e in events}
-display_names = list(event_options.keys())
+# Create dropdown options with activity indicators
+event_options = {}
+display_names = []
+
+for e in events:
+    totals = e.get('totals', 0)
+    if totals > 0:
+        display_text = f"{e['display']} ({totals:,} events this week)"
+    else:
+        display_text = f"{e['display']} (no recent activity)"
+    
+    event_options[display_text] = e['value']
+    display_names.append(display_text)
 
 # Show event selector
 st.subheader("Select Event to Analyze")
 selected_display = st.selectbox("Pick an event:", display_names)
 selected_event = event_options[selected_display]
 
-st.caption(f"Event API name: `{selected_event}`")
+# Show the actual event name being used
+st.caption(f"Event value name: `{selected_event}`")
 
 # Time period selector
 period = st.selectbox("Time Period", ["Last 7 Days", "Last 30 Days", "Last 90 Days"])
@@ -187,5 +230,18 @@ if st.button("🔄 Load Data") or 'last_event' not in st.session_state or st.ses
         st.info("Check the event name or try a different event.")
 
 st.markdown("---")
-st.caption("💡 Select different events to see which ones are getting traffic")
+st.caption("💡 **Tip**: Events with higher counts are being tracked more frequently")
+st.caption("🚀 **Best for website traffic**: Look for events like 'Page View', 'Session Start', or any custom pageview events")
 st.caption("🔄 Click 'Load Data' button to refresh after changing selections")
+
+with st.expander("ℹ️ Which event should I use?"):
+    st.markdown("""
+    **For tracking website traffic from promotions, look for:**
+    - `Page View` or `Page Viewed` - Shows when users view pages
+    - `Session Start` - Shows when users start a new session
+    - `[Amplitude] Any Active Event` - Shows any user activity
+    
+    **Events with high counts** are being actively tracked and will give you the best data.
+    
+    **Events with "no recent activity"** might be old/unused events.
+    """)
