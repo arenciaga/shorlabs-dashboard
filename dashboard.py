@@ -8,153 +8,126 @@ from datetime import datetime
 from dotenv import load_dotenv
 from boto3.dynamodb.conditions import Key, Attr
 
-# Load environment variables
 load_dotenv()
-
-
-def format_date(iso_date_str):
-    """Format ISO date string to a more readable format"""
-    if not iso_date_str or iso_date_str == 'N/A':
-        return 'N/A'
-    try:
-        # Parse ISO format like "2026-02-04T22:18:11.905013"
-        dt = datetime.fromisoformat(iso_date_str.replace('Z', '+00:00'))
-        return dt.strftime('%b %d, %Y %I:%M %p')  # e.g., "Feb 04, 2026 10:18 PM"
-    except (ValueError, AttributeError):
-        return iso_date_str  # Return original if parsing fails
 
 CLERK_SECRET_KEY = os.getenv("CLERK_SECRET_KEY")
 
-st.set_page_config(page_title="Projects Dashboard", layout="wide")
+st.set_page_config(page_title="Services Dashboard", layout="wide")
+st.title("Services Dashboard")
 
-st.title("Projects Dashboard")
+
+def format_date(iso_date_str):
+    if not iso_date_str or iso_date_str == 'N/A':
+        return 'N/A'
+    try:
+        dt = datetime.fromisoformat(iso_date_str.replace('Z', '+00:00'))
+        return dt.strftime('%b %d, %Y %I:%M %p')
+    except (ValueError, AttributeError):
+        return iso_date_str
 
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+@st.cache_data(ttl=300)
 def fetch_clerk_organizations():
-    """Fetch all organizations from Clerk and return a dict mapping org_id -> org_info"""
     if not CLERK_SECRET_KEY:
-        st.warning("CLERK_SECRET_KEY not found. Organization names will not be available.")
         return {}
-    
+
     orgs_map = {}
     url = "https://api.clerk.com/v1/organizations?limit=500"
     headers = {
         "Authorization": f"Bearer {CLERK_SECRET_KEY}",
         "Content-Type": "application/json"
     }
-    
+
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         orgs_data = response.json()
-        
-        # Handle different response formats
-        if isinstance(orgs_data, list):
-            orgs_list = orgs_data
-        elif isinstance(orgs_data, dict) and 'data' in orgs_data:
-            orgs_list = orgs_data.get('data', [])
-        else:
-            orgs_list = []
-        
+
+        orgs_list = orgs_data if isinstance(orgs_data, list) else orgs_data.get('data', [])
+
         for org in orgs_list:
             org_id = org.get('id')
             if org_id:
-                orgs_map[org_id] = {
-                    'name': org.get('name', 'N/A'),
-                    'created_by': org.get('created_by'),
-                }
+                orgs_map[org_id] = {'name': org.get('name', 'N/A')}
     except requests.exceptions.RequestException as e:
         st.error(f"Error fetching organizations from Clerk: {e}")
-    
+
     return orgs_map
 
 
 def fetch_org_admin_email(org_id):
-    """Fetch the admin member of an organization and return their email"""
     if not CLERK_SECRET_KEY:
         return "N/A"
-    
+
     url = f"https://api.clerk.com/v1/organizations/{org_id}/memberships?limit=100"
     headers = {
         "Authorization": f"Bearer {CLERK_SECRET_KEY}",
         "Content-Type": "application/json"
     }
-    
+
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         memberships_data = response.json()
-        
-        # Handle different response formats
-        if isinstance(memberships_data, list):
-            memberships = memberships_data
-        elif isinstance(memberships_data, dict) and 'data' in memberships_data:
-            memberships = memberships_data.get('data', [])
-        else:
-            memberships = []
-        
-        # Find admin member
+
+        memberships = memberships_data if isinstance(memberships_data, list) else memberships_data.get('data', [])
+
         for membership in memberships:
             role = membership.get('role', '')
-            if role == 'org:admin' or role == 'admin':
-                # Get user info from public_user_data
+            if role in ('org:admin', 'admin'):
                 public_user_data = membership.get('public_user_data', {})
-                # Try identifier first (usually email), then other fields
                 email = public_user_data.get('identifier')
                 if not email:
-                    # Fallback: fetch user details
                     user_id = public_user_data.get('user_id')
                     if user_id:
                         email = fetch_user_email(user_id)
-                return email if email else "N/A"
-        
-        # If no admin found, return first member's email
+                return email or "N/A"
+
         if memberships:
-            public_user_data = memberships[0].get('public_user_data', {})
-            email = public_user_data.get('identifier')
-            return email if email else "N/A"
-            
+            email = memberships[0].get('public_user_data', {}).get('identifier')
+            return email or "N/A"
+
     except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching org memberships for {org_id}: {e}")
-    
+        st.error(f"Error fetching memberships for {org_id}: {e}")
+
     return "N/A"
 
 
 def fetch_user_email(user_id):
-    """Fetch a user's email by their ID"""
     if not CLERK_SECRET_KEY:
         return None
-    
+
     url = f"https://api.clerk.com/v1/users/{user_id}"
     headers = {
         "Authorization": f"Bearer {CLERK_SECRET_KEY}",
         "Content-Type": "application/json"
     }
-    
+
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         user = response.json()
-        
         email_addresses = user.get('email_addresses', [])
         primary_id = user.get('primary_email_address_id')
-        
+
         if email_addresses:
             if primary_id:
-                for email_obj in email_addresses:
-                    if email_obj.get('id') == primary_id:
-                        return email_obj.get('email_address')
+                for e in email_addresses:
+                    if e.get('id') == primary_id:
+                        return e.get('email_address')
             return email_addresses[0].get('email_address')
-    except requests.exceptions.RequestException as e:
-        pass  # Silently fail for individual user fetches
-    
+    except requests.exceptions.RequestException:
+        pass
+
     return None
 
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def fetch_projects_from_dynamodb():
-    """Fetch projects from DynamoDB"""
+@st.cache_data(ttl=300)
+def fetch_services_from_dynamodb():
+    """Fetch all service records from DynamoDB.
+    Services have SK matching the pattern PROJECT#...#SERVICE#...
+    and entity_type == 'service'.
+    """
     dynamodb = boto3.resource(
         'dynamodb',
         region_name=os.getenv('AWS_REGION', 'us-east-1'),
@@ -162,21 +135,18 @@ def fetch_projects_from_dynamodb():
         aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY')
     )
 
-    table_name = 'shorlabs-projects'
-    table = dynamodb.Table(table_name)
+    table = dynamodb.Table('shorlabs-projects')
 
-    # Scan the table for projects
-    # Projects now have PK starting with "ORG#" and SK starting with "PROJECT#"
+    # Services have entity_type == 'service' and SK contains '#SERVICE#'
     response = table.scan(
-        FilterExpression=Attr('SK').begins_with('PROJECT#') & Attr('PK').begins_with('ORG#')
+        FilterExpression=Attr('entity_type').eq('service') & Attr('PK').begins_with('ORG#')
     )
-    
+
     items = response.get('Items', [])
-    
-    # Handle pagination
+
     while 'LastEvaluatedKey' in response:
         response = table.scan(
-            FilterExpression=Attr('SK').begins_with('PROJECT#') & Attr('PK').begins_with('ORG#'),
+            FilterExpression=Attr('entity_type').eq('service') & Attr('PK').begins_with('ORG#'),
             ExclusiveStartKey=response['LastEvaluatedKey']
         )
         items.extend(response.get('Items', []))
@@ -184,106 +154,167 @@ def fetch_projects_from_dynamodb():
     return items
 
 
-# Check for required environment variables
-missing_vars = []
-if not os.getenv('AWS_ACCESS_KEY_ID'):
-    missing_vars.append('AWS_ACCESS_KEY_ID')
-if not os.getenv('AWS_SECRET_ACCESS_KEY'):
-    missing_vars.append('AWS_SECRET_ACCESS_KEY')
-if not CLERK_SECRET_KEY:
-    missing_vars.append('CLERK_SECRET_KEY')
+# ── Env check ────────────────────────────────────────────────────────────────
+missing_vars = [v for v in ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'CLERK_SECRET_KEY')
+                if not os.getenv(v)]
 
 if missing_vars:
     st.error(f"Missing environment variables: {', '.join(missing_vars)}")
 else:
     with st.spinner("Fetching data..."):
         try:
-            # Fetch organizations from Clerk
             orgs_map = fetch_clerk_organizations()
-            
-            # Fetch projects from DynamoDB
-            items = fetch_projects_from_dynamodb()
-            
+            items = fetch_services_from_dynamodb()
+
             if not items:
-                st.info("No projects found.")
+                st.info("No services found.")
             else:
-                # Cache for admin emails
                 admin_email_cache = {}
-                
-                # Build display data
-                parsed_projects = []
+                parsed_services = []
+
                 for item in items:
-                    # Extract org_id from organization_id field or from PK
+                    # ── Org info ──────────────────────────────────────────
                     org_id = item.get('organization_id', '')
                     if not org_id:
-                        # Try extracting from PK (format: ORG#org_xxx)
                         pk = item.get('PK', '')
                         if pk.startswith('ORG#'):
-                            org_id = pk[4:]  # Remove 'ORG#' prefix
-                    
-                    # Get organization name from Clerk data
-                    org_info = orgs_map.get(org_id, {})
-                    org_name = org_info.get('name', 'N/A')
-                    
-                    # Get admin email (with caching)
+                            org_id = pk[4:]
+
+                    org_name = orgs_map.get(org_id, {}).get('name', 'N/A')
+
                     if org_id not in admin_email_cache:
                         admin_email_cache[org_id] = fetch_org_admin_email(org_id)
                     admin_email = admin_email_cache.get(org_id, 'N/A')
-                    
-                    # Date deployed
-                    date_deployed = format_date(item.get('created_at', 'N/A'))
-                    
-                    # Project name
-                    project_name = item.get('name', 'N/A')
-                    
-                    # Use custom_url if it exists, otherwise function_url
-                    url = item.get('custom_url')
-                    if not url:
-                        url = item.get('function_url', 'N/A')
-                    
-                    # Status
-                    status = item.get('status', 'N/A')
-                    
-                    parsed_projects.append({
-                        "Org ID": org_id,
-                        "Organization Name": org_name,
-                        "Admin Email": admin_email,
-                        "Project Name": project_name,
-                        "Status": status,
-                        "Date Deployed": date_deployed,
-                        "Project URL": url
+
+                    # ── Service fields ────────────────────────────────────
+                    service_type = item.get('service_type', 'N/A')  # 'web-app' | 'database'
+                    service_name = item.get('name', 'N/A')
+                    service_id   = item.get('service_id', item.get('SK', 'N/A'))
+                    project_id   = item.get('project_id', 'N/A')
+                    status       = item.get('status', 'N/A')
+                    github_repo  = item.get('github_repo', '')
+                    github_url   = item.get('github_url', '')
+                    memory       = item.get('memory', 'N/A')
+                    start_cmd    = item.get('start_command', 'N/A')
+                    date_created = format_date(item.get('created_at', 'N/A'))
+                    date_updated = format_date(item.get('updated_at', 'N/A'))
+
+                    # URL: custom > function_url (web-app only)
+                    url = item.get('custom_url') or item.get('function_url', 'N/A')
+
+                    # ── Database-specific fields ──────────────────────────
+                    db_endpoint = item.get('db_endpoint', '')
+                    db_name     = item.get('db_name', '')
+                    db_port     = item.get('db_port', '')
+                    db_cluster  = item.get('db_cluster_identifier', '')
+
+                    parsed_services.append({
+                        "Org ID":           org_id,
+                        "Organization":     org_name,
+                        "Admin Email":      admin_email,
+                        "Service Name":     service_name,
+                        "Service Type":     service_type,
+                        "Status":           status,
+                        "Project ID":       project_id,
+                        "Service ID":       service_id,
+                        "URL":              url,
+                        "GitHub Repo":      github_repo,
+                        "GitHub URL":       github_url,
+                        "Memory (MB)":      memory,
+                        "Start Command":    start_cmd,
+                        "DB Endpoint":      db_endpoint,
+                        "DB Name":          db_name,
+                        "DB Port":          db_port,
+                        "DB Cluster":       db_cluster,
+                        "Created At":       date_created,
+                        "Updated At":       date_updated,
                     })
-                
-                if parsed_projects:
-                    df = pd.DataFrame(parsed_projects)
-                    
-                    # Top Level Metrics
-                    col1, col2, col3 = st.columns(3)
+
+                if not parsed_services:
+                    st.info("No services found.")
+                else:
+                    df = pd.DataFrame(parsed_services)
+
+                    # ── Metrics ───────────────────────────────────────────
+                    col1, col2, col3, col4, col5 = st.columns(5)
                     with col1:
-                        st.metric(label="Total Projects", value=len(df))
+                        st.metric("Total Services", len(df))
                     with col2:
-                        st.metric(label="Unique Organizations", value=df['Org ID'].nunique())
+                        st.metric("Unique Orgs", df['Org ID'].nunique())
                     with col3:
-                        live_count = len(df[df['Status'] == 'LIVE'])
-                        st.metric(label="Live Projects", value=live_count)
-                    
+                        st.metric("Live Services", len(df[df['Status'] == 'LIVE']))
+                    with col4:
+                        st.metric("Web Apps", len(df[df['Service Type'] == 'web-app']))
+                    with col5:
+                        st.metric("Databases", len(df[df['Service Type'] == 'database']))
+
                     st.divider()
-                    
-                    # Display the dataframe
-                    st.dataframe(df, use_container_width=True)
-                    
-                    # CSV Export
-                    csv = df.to_csv(index=False).encode('utf-8')
+
+                    # ── Filters ───────────────────────────────────────────
+                    fcol1, fcol2, fcol3 = st.columns(3)
+                    with fcol1:
+                        type_filter = st.multiselect(
+                            "Service Type",
+                            options=sorted(df['Service Type'].dropna().unique()),
+                            default=[]
+                        )
+                    with fcol2:
+                        status_filter = st.multiselect(
+                            "Status",
+                            options=sorted(df['Status'].dropna().unique()),
+                            default=[]
+                        )
+                    with fcol3:
+                        org_filter = st.multiselect(
+                            "Organization",
+                            options=sorted(df['Organization'].dropna().unique()),
+                            default=[]
+                        )
+
+                    filtered_df = df.copy()
+                    if type_filter:
+                        filtered_df = filtered_df[filtered_df['Service Type'].isin(type_filter)]
+                    if status_filter:
+                        filtered_df = filtered_df[filtered_df['Status'].isin(status_filter)]
+                    if org_filter:
+                        filtered_df = filtered_df[filtered_df['Organization'].isin(org_filter)]
+
+                    st.caption(f"Showing {len(filtered_df)} of {len(df)} services")
+
+                    # ── Tabbed views: Web Apps vs Databases ───────────────
+                    tab_all, tab_web, tab_db = st.tabs(["All Services", "Web Apps", "Databases"])
+
+                    WEB_COLS = ["Organization", "Admin Email", "Service Name", "Status",
+                                "URL", "GitHub Repo", "Memory (MB)", "Start Command",
+                                "Created At", "Updated At"]
+                    DB_COLS  = ["Organization", "Admin Email", "Service Name", "Status",
+                                "DB Cluster", "DB Endpoint", "DB Name", "DB Port",
+                                "Created At", "Updated At"]
+
+                    with tab_all:
+                        st.dataframe(filtered_df, use_container_width=True)
+
+                    with tab_web:
+                        web_df = filtered_df[filtered_df['Service Type'] == 'web-app']
+                        available = [c for c in WEB_COLS if c in web_df.columns]
+                        st.dataframe(web_df[available], use_container_width=True)
+
+                    with tab_db:
+                        db_df = filtered_df[filtered_df['Service Type'] == 'database']
+                        available = [c for c in DB_COLS if c in db_df.columns]
+                        st.dataframe(db_df[available], use_container_width=True)
+
+                    st.divider()
+
+                    # ── CSV export ────────────────────────────────────────
+                    csv = filtered_df.to_csv(index=False).encode('utf-8')
                     st.download_button(
-                        label="Download data as CSV",
+                        label="Download filtered data as CSV",
                         data=csv,
-                        file_name='projects_export.csv',
+                        file_name='services_export.csv',
                         mime='text/csv',
                     )
-                    
-                    st.success(f"Successfully loaded {len(df)} projects from {df['Org ID'].nunique()} organizations.")
-                else:
-                    st.info("No projects found.")
-                    
+
         except Exception as e:
             st.error(f"Error: {e}")
+            st.exception(e)
