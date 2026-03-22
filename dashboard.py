@@ -124,10 +124,7 @@ def fetch_user_email(user_id):
 
 @st.cache_data(ttl=300)
 def fetch_services_from_dynamodb():
-    """Fetch all service records from DynamoDB.
-    Services have SK matching the pattern PROJECT#...#SERVICE#...
-    and entity_type == 'service'.
-    """
+    """Fetch all service records from the dedicated shorlabs-services table."""
     dynamodb = boto3.resource(
         'dynamodb',
         region_name=os.getenv('AWS_REGION', 'us-east-1'),
@@ -135,18 +132,14 @@ def fetch_services_from_dynamodb():
         aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY')
     )
 
-    table = dynamodb.Table('shorlabs-projects')
+    table = dynamodb.Table('shorlabs-services')
 
-    # Services have entity_type == 'service' and SK contains '#SERVICE#'
-    response = table.scan(
-        FilterExpression=Attr('entity_type').eq('service') & Attr('PK').begins_with('ORG#')
-    )
+    response = table.scan()
 
     items = response.get('Items', [])
 
     while 'LastEvaluatedKey' in response:
         response = table.scan(
-            FilterExpression=Attr('entity_type').eq('service') & Attr('PK').begins_with('ORG#'),
             ExclusiveStartKey=response['LastEvaluatedKey']
         )
         items.extend(response.get('Items', []))
